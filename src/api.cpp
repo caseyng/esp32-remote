@@ -9,7 +9,8 @@
  *   POST /fans/add
  *   POST /fans/{id}/update
  *   DEL  /fans/{id}
- *   POST /fans/{id}/learn/{command}
+ *   POST /fans/{id}/learn/{command}   → 202; learn runs in background task
+ *   GET  /fans/{id}/learn/status      → poll for learn result
  *   POST /fans/{id}/off
  *   POST /fans/{id}/speed/{level}
  *   POST /fans/{id}/light/on
@@ -25,12 +26,83 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <map>
 
 // ---------------------------------------------------------------------------
 // Server instance
 // ---------------------------------------------------------------------------
 
 static AsyncWebServer g_server(80);
+
+// ---------------------------------------------------------------------------
+// Per-request body accumulator
+// ESPAsyncWebServer may deliver the body in multiple chunks. We accumulate
+// into a String keyed by the request pointer, then parse once complete.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Background RF learn task
+// Only one learn operation runs at a time. The task writes results here and
+// deletes itself; the poll endpoint reads the state.
+// ---------------------------------------------------------------------------
+
+enum class LearnState { IDLE, RUNNING, DONE_OK, DONE_TIMEOUT, DONE_ERROR };
+
+struct LearnResult {
+    LearnState state   = LearnState::IDLE;
+    int        fanId   = 0;
+    String     command;
+    uint32_t   value   = 0;
+    uint16_t   pulse   = 350;
+    uint8_t    protocol = 1;
+    uint8_t    bits    = 24;
+    String     errorMsg;
+};
+
+static LearnResult g_learn;
+
+static void learnTask(void* /*param*/) {
+    uint32_t value = 0; uint16_t pulse = 350; uint8_t protocol = 1, bits = 24;
+    String fanIdStr = String(g_learn.fanId);
+
+    bool ok = rfLearn(fanIdStr, g_learn.command, &value, &pulse, &protocol, &bits, 30000);
+    if (ok) {
+        bool saved = setFanCode(g_learn.fanId, g_learn.command, value, pulse, protocol, bits);
+        if (saved) {
+            configSave();
+            g_learn.value    = value;
+            g_learn.pulse    = pulse;
+            g_learn.protocol = protocol;
+            g_learn.bits     = bits;
+            g_learn.state    = LearnState::DONE_OK;
+        } else {
+            g_learn.errorMsg = "failed to save code";
+            g_learn.state    = LearnState::DONE_ERROR;
+        }
+    } else {
+        g_learn.state = LearnState::DONE_TIMEOUT;
+    }
+    vTaskDelete(nullptr);
+}
+
+static std::map<AsyncWebServerRequest*, String> g_bodyBufs;
+
+static void bodyAppend(AsyncWebServerRequest* req, uint8_t* data, size_t len,
+                       size_t index, size_t total) {
+    if (index == 0) g_bodyBufs[req].reserve(total);
+    g_bodyBufs[req].concat(reinterpret_cast<const char*>(data), len);
+}
+
+static bool bodyComplete(AsyncWebServerRequest* req, size_t index,
+                         size_t len, size_t total) {
+    return (index + len >= total);
+}
+
+static String bodyConsume(AsyncWebServerRequest* req) {
+    String s = std::move(g_bodyBufs[req]);
+    g_bodyBufs.erase(req);
+    return s;
+}
 
 // ---------------------------------------------------------------------------
 // Response helpers
@@ -134,12 +206,14 @@ static void handleGetFans(AsyncWebServerRequest* req) {
 
 static void handleAddFan(AsyncWebServerRequest* req, uint8_t* data, size_t len,
                           size_t index, size_t total) {
-    if (index + len < total) return;  // wait for full body
+    bodyAppend(req, data, len, index, total);
+    if (!bodyComplete(req, index, len, total)) return;
 
     Serial.println("[api] POST /fans/add");
+    String raw = bodyConsume(req);
 
     JsonDocument body;
-    DeserializationError err = deserializeJson(body, data, len);
+    DeserializationError err = deserializeJson(body, raw);
     if (err) {
         sendError(req, 400, "invalid JSON body");
         return;
@@ -194,18 +268,21 @@ static void handleAddFan(AsyncWebServerRequest* req, uint8_t* data, size_t len,
 
 static void handleUpdateFan(AsyncWebServerRequest* req, uint8_t* data, size_t len,
                               size_t index, size_t total, int fanId) {
-    if (index + len < total) return;
+    bodyAppend(req, data, len, index, total);
+    if (!bodyComplete(req, index, len, total)) return;
 
     Serial.printf("[api] POST /fans/%d/update\n", fanId);
 
     FanConfig* fan = getFanById(fanId);
     if (!fan) {
+        bodyConsume(req);  // discard buffer
         sendError(req, 404, "fan not found");
         return;
     }
 
+    String raw = bodyConsume(req);
     JsonDocument body;
-    DeserializationError err = deserializeJson(body, data, len);
+    DeserializationError err = deserializeJson(body, raw);
     if (err) {
         sendError(req, 400, "invalid JSON body");
         return;
@@ -285,6 +362,11 @@ static void handleDeleteFan(AsyncWebServerRequest* req, int fanId) {
 static void handleLearn(AsyncWebServerRequest* req, int fanId, const String& command) {
     Serial.printf("[api] POST /fans/%d/learn/%s\n", fanId, command.c_str());
 
+    if (g_learn.state == LearnState::RUNNING) {
+        sendError(req, 409, "another learn operation is already running");
+        return;
+    }
+
     FanConfig* fan = getFanById(fanId);
     if (!fan) {
         sendError(req, 404, "fan not found");
@@ -297,35 +379,67 @@ static void handleLearn(AsyncWebServerRequest* req, int fanId, const String& com
         return;
     }
 
-    uint32_t value    = 0;
-    uint16_t pulse    = 350;
-    uint8_t  protocol = 1;
-    uint8_t  bits     = 24;
+    g_learn = LearnResult{};
+    g_learn.state   = LearnState::RUNNING;
+    g_learn.fanId   = fanId;
+    g_learn.command = command;
 
-    String fanIdStr = String(fanId);
-    bool captured = rfLearn(fanIdStr, command, &value, &pulse, &protocol, &bits, 30000);
-
-    if (!captured) {
-        sendError(req, 408, "timeout: no RF signal received within 30 seconds");
-        return;
-    }
-
-    if (!setFanCode(fanId, command, value, pulse, protocol, bits)) {
-        sendError(req, 500, "failed to save learned code");
-        return;
-    }
-
-    if (!configSave()) {
-        Serial.println("[api] WARNING: configSave failed after learn");
-    }
+    // Run in a separate task so the async_tcp task is not blocked for 30 s
+    xTaskCreate(learnTask, "rfLearn", 4096, nullptr, 1, nullptr);
 
     JsonDocument resp;
-    resp["ok"]       = true;
-    resp["value"]    = value;
-    resp["pulse"]    = pulse;
-    resp["protocol"] = protocol;
-    resp["bits"]     = bits;
-    sendJson(req, 200, resp);
+    resp["ok"]      = true;
+    resp["status"]  = "learning";
+    resp["poll"]    = "/fans/" + String(fanId) + "/learn/status";
+    sendJson(req, 202, resp);
+}
+
+static void handleLearnStatus(AsyncWebServerRequest* req, int fanId) {
+    Serial.printf("[api] GET /fans/%d/learn/status\n", fanId);
+
+    JsonDocument resp;
+    switch (g_learn.state) {
+        case LearnState::IDLE:
+            resp["status"] = "idle";
+            sendJson(req, 200, resp);
+            break;
+        case LearnState::RUNNING:
+            if (g_learn.fanId != fanId) {
+                resp["status"]  = "running";
+                resp["fan_id"]  = g_learn.fanId;
+                resp["command"] = g_learn.command;
+                sendJson(req, 200, resp);
+            } else {
+                resp["status"]  = "running";
+                resp["command"] = g_learn.command;
+                sendJson(req, 200, resp);
+            }
+            break;
+        case LearnState::DONE_OK:
+            resp["ok"]       = true;
+            resp["status"]   = "done";
+            resp["value"]    = g_learn.value;
+            resp["pulse"]    = g_learn.pulse;
+            resp["protocol"] = g_learn.protocol;
+            resp["bits"]     = g_learn.bits;
+            g_learn.state    = LearnState::IDLE;
+            sendJson(req, 200, resp);
+            break;
+        case LearnState::DONE_TIMEOUT:
+            resp["ok"]     = false;
+            resp["status"] = "timeout";
+            resp["error"]  = "no RF signal received within 30 seconds";
+            g_learn.state  = LearnState::IDLE;
+            sendJson(req, 408, resp);
+            break;
+        case LearnState::DONE_ERROR:
+            resp["ok"]     = false;
+            resp["status"] = "error";
+            resp["error"]  = g_learn.errorMsg;
+            g_learn.state  = LearnState::IDLE;
+            sendJson(req, 500, resp);
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +462,10 @@ static void handleFanOff(AsyncWebServerRequest* req, int fanId) {
     }
 
     const RFCode& code = it->second;
-    rfSend(code.value, code.pulse, code.protocol, code.bits);
+    if (!rfSend(code.value, code.pulse, code.protocol, code.bits)) {
+        sendError(req, 500, "RF transmit failed");
+        return;
+    }
     sendOk(req);
 }
 
@@ -378,7 +495,10 @@ static void handleFanSpeed(AsyncWebServerRequest* req, int fanId, int level) {
     }
 
     const RFCode& code = it->second;
-    rfSend(code.value, code.pulse, code.protocol, code.bits);
+    if (!rfSend(code.value, code.pulse, code.protocol, code.bits)) {
+        sendError(req, 500, "RF transmit failed");
+        return;
+    }
     sendOk(req);
 }
 
@@ -409,7 +529,10 @@ static void handleFanLight(AsyncWebServerRequest* req, int fanId, bool turnOn) {
     }
 
     const RFCode& code = it->second;
-    rfSend(code.value, code.pulse, code.protocol, code.bits);
+    if (!rfSend(code.value, code.pulse, code.protocol, code.bits)) {
+        sendError(req, 500, "RF transmit failed");
+        return;
+    }
     sendOk(req);
 }
 
@@ -473,6 +596,13 @@ void apiInit() {
             handleLearn(req, fanId, command);
         }
     );
+
+    // GET /fans/{id}/learn/status
+    g_server.on("/fans/{id}/learn/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+        int fanId = parseFanId(req, req->pathArg(0));
+        if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
+        handleLearnStatus(req, fanId);
+    });
 
     // POST /fans/{id}/off
     g_server.on("/fans/{id}/off", HTTP_POST, [](AsyncWebServerRequest* req) {

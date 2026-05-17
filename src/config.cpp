@@ -244,6 +244,6 @@ bool setFanCode(int id, const String& command, uint32_t value,
     return true;
 }
 
-std::vector<FanConfig> getAllFans() {
+const std::vector<FanConfig>& getAllFans() {
     return g_fans;
 }

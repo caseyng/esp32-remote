@@ -100,9 +100,10 @@ bool setFanCode(int id, const String& command, uint32_t value,
                 uint16_t pulse, uint8_t protocol, uint8_t bits);
 
 /**
- * Return a copy of all configured fans.
+ * Return a const reference to the in-memory fan list.
+ * Valid until the list is mutated (add/delete).
  */
-std::vector<FanConfig> getAllFans();
+const std::vector<FanConfig>& getAllFans();
 
 /**
  * Return true if the given command string is one of ALL_COMMANDS.
