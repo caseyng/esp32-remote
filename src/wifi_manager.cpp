@@ -123,7 +123,8 @@ static const char AP_SAVED_HTML[] PROGMEM = R"rawhtml(
 // ---------------------------------------------------------------------------
 
 static void runAPMode() {
-    Serial.println("[wifi] Starting AP mode: SSID=" AP_SSID);
+    Serial.print("[wifi] Starting AP mode: SSID=");
+    Serial.println(AP_SSID);
 
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
@@ -165,7 +166,11 @@ static void runAPMode() {
 
     apServer.begin();
     Serial.println("[wifi] AP config server running at http://192.168.4.1");
-    Serial.println("[wifi] Connect to '" AP_SSID "' (password: " AP_PASSWORD ") to configure WiFi.");
+    Serial.print("[wifi] Connect to '");
+    Serial.print(AP_SSID);
+    Serial.print("' (password: ");
+    Serial.print(AP_PASSWORD);
+    Serial.println(") to configure WiFi.");
 
     // Loop forever — the only way out is a reboot triggered by /save
     while (true) {
