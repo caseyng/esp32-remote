@@ -131,3 +131,8 @@ override.tf.json
 *.db
 *.sqlite
 *.sqlite3
+
+# ================================
+# Claude Code internal
+# ================================
+.claude/
