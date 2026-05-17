@@ -14,6 +14,7 @@
  *   POST /fans/{id}/speed/{level}
  *   POST /fans/{id}/light/on
  *   POST /fans/{id}/light/off
+ *   GET  /status
  */
 
 #include "api.h"
@@ -22,6 +23,8 @@
 
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <LittleFS.h>
+#include <WiFi.h>
 
 // ---------------------------------------------------------------------------
 // Server instance
@@ -502,6 +505,30 @@ void apiInit() {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanLight(req, fanId, false);
+    });
+
+    // GET /status
+    g_server.on("/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+        JsonDocument doc;
+        doc["uptime_s"]        = millis() / 1000;
+        doc["free_heap"]       = ESP.getFreeHeap();
+        doc["min_free_heap"]   = ESP.getMinFreeHeap();
+        doc["wifi_rssi"]       = WiFi.RSSI();
+        doc["wifi_ssid"]       = WiFi.SSID();
+        doc["ip"]              = WiFi.localIP().toString();
+
+        size_t fsTotal = 0, fsUsed = 0;
+        if (LittleFS.totalBytes() > 0) {
+            fsTotal = LittleFS.totalBytes();
+            fsUsed  = LittleFS.usedBytes();
+        }
+        doc["fs_total_bytes"]  = fsTotal;
+        doc["fs_used_bytes"]   = fsUsed;
+        doc["fan_count"]       = (int)getAllFans().size();
+
+        String body;
+        serializeJson(doc, body);
+        req->send(200, "application/json", body);
     });
 
     // -----------------------------------------------------------------------
