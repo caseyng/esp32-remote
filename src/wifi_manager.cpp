@@ -148,6 +148,18 @@ static void runAPMode() {
             apServer.send(400, "text/plain", "SSID cannot be empty");
             return;
         }
+        if (ssid.length() > 32) {
+            apServer.send(400, "text/plain", "SSID too long (max 32 characters)");
+            return;
+        }
+        if (!pass.isEmpty() && pass.length() < 8) {
+            apServer.send(400, "text/plain", "Password too short (min 8 characters)");
+            return;
+        }
+        if (pass.length() > 63) {
+            apServer.send(400, "text/plain", "Password too long (max 63 characters)");
+            return;
+        }
 
         nvsSaveCreds(ssid, pass);
         apServer.send_P(200, "text/html", AP_SAVED_HTML);

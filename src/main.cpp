@@ -64,7 +64,7 @@ void setup() {
     // -----------------------------------------------------------------------
     Serial.println("\n[main] System ready.");
     Serial.printf("[main] API server:  http://%s/\n", wifiGetIP().c_str());
-    Serial.printf("[main] Fans loaded: %zu\n", getAllFans().size());
+    Serial.printf("[main] Fans loaded: %zu\n", getAllFans().size());  // const ref, no copy
     Serial.println("[main] Waiting for requests...\n");
 }
 

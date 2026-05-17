@@ -133,7 +133,7 @@ static void sendError(AsyncWebServerRequest* req, int code, const char* msg) {
 // ---------------------------------------------------------------------------
 
 static int parseFanId(AsyncWebServerRequest* req, const String& paramStr) {
-    // paramStr comes from the URL path segment e.g. "42"
+    if (paramStr.isEmpty()) return -1;
     for (char c : paramStr) {
         if (!isdigit(c)) return -1;
     }
@@ -219,7 +219,7 @@ static void handleAddFan(AsyncWebServerRequest* req, uint8_t* data, size_t len,
         return;
     }
 
-    if (!body["name"].is<const char*>() && !body["name"].is<String>()) {
+    if (!body["name"].is<const char*>()) {
         sendError(req, 400, "name is required and must be a string");
         return;
     }
@@ -258,7 +258,7 @@ static void handleAddFan(AsyncWebServerRequest* req, uint8_t* data, size_t len,
     JsonDocument resp;
     resp["ok"] = true;
     resp["id"] = newId;
-    sendJson(req, 200, resp);
+    sendJson(req, 201, resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ static void handleUpdateFan(AsyncWebServerRequest* req, uint8_t* data, size_t le
     bool lightsVal = false;
     const bool* lightsPtr = nullptr;
 
-    if (body["name"].is<const char*>() || body["name"].is<String>()) {
+    if (body["name"].is<const char*>()) {
         nameVal = body["name"].as<String>();
         if (nameVal.isEmpty()) {
             sendError(req, 400, "name cannot be empty");
@@ -337,11 +337,6 @@ static void handleUpdateFan(AsyncWebServerRequest* req, uint8_t* data, size_t le
 
 static void handleDeleteFan(AsyncWebServerRequest* req, int fanId) {
     Serial.printf("[api] DELETE /fans/%d\n", fanId);
-
-    if (!getFanById(fanId)) {
-        sendError(req, 404, "fan not found");
-        return;
-    }
 
     if (!deleteFan(fanId)) {
         sendError(req, 404, "fan not found");
@@ -569,14 +564,26 @@ void apiInit() {
     // -----------------------------------------------------------------------
 
     // POST /fans/{id}/update
+    // parseFanId is validated in onRequest (fires once) and stored in
+    // _tempObject so onBody never sends a duplicate error on chunked bodies.
     g_server.on("/fans/{id}/update", HTTP_POST,
-        [](AsyncWebServerRequest* req) {},
+        [](AsyncWebServerRequest* req) {
+            int fanId = parseFanId(req, req->pathArg(0));
+            if (fanId < 0) {
+                sendError(req, 400, "invalid fan id");
+                req->_tempObject = reinterpret_cast<void*>(-1);
+            } else {
+                req->_tempObject = reinterpret_cast<void*>(static_cast<intptr_t>(fanId));
+            }
+        },
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len,
            size_t index, size_t total) {
-            int fanId = parseFanId(req, req->pathArg(0));
-            if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
-            handleUpdateFan(req, data, len, index, total, fanId);
+            intptr_t stored = reinterpret_cast<intptr_t>(req->_tempObject);
+            if (stored == -1) return;  // error already sent in onRequest
+            bodyAppend(req, data, len, index, total);
+            if (!bodyComplete(req, index, len, total)) return;
+            handleUpdateFan(req, data, len, index, total, static_cast<int>(stored));
         }
     );
 
@@ -654,11 +661,23 @@ void apiInit() {
         }
         doc["fs_total_bytes"]  = fsTotal;
         doc["fs_used_bytes"]   = fsUsed;
-        doc["fan_count"]       = (int)getAllFans().size();
+        doc["fan_count"]       = (int)getAllFans().size();  // const ref, no copy
 
         String body;
         serializeJson(doc, body);
         req->send(200, "application/json", body);
+    });
+
+    // POST /factory-reset — deliberately wipes LittleFS and restarts
+    g_server.on("/factory-reset", HTTP_POST, [](AsyncWebServerRequest* req) {
+        Serial.println("[api] POST /factory-reset — formatting LittleFS");
+        LittleFS.format();
+        JsonDocument doc;
+        doc["ok"]      = true;
+        doc["message"] = "LittleFS formatted, restarting in 2 seconds";
+        sendJson(req, 200, doc);
+        delay(2000);
+        ESP.restart();
     });
 
     // -----------------------------------------------------------------------

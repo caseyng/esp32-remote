@@ -53,8 +53,8 @@ bool isValidCommand(const String& command) {
 bool configLoad() {
     g_fans.clear();
 
-    if (!LittleFS.begin(true)) {   // true = format on fail
-        Serial.println("[config] LittleFS mount failed");
+    if (!LittleFS.begin(false)) {
+        Serial.println("[config] LittleFS mount failed — run POST /factory-reset to reformat");
         return false;
     }
     Serial.println("[config] LittleFS mounted");
@@ -161,6 +161,11 @@ int addFan(const String& name, int max_speed, bool lights) {
         Serial.println("[config] addFan: name is empty");
         return -1;
     }
+    if (name.length() > MAX_FAN_NAME_LEN) {
+        Serial.printf("[config] addFan: name too long (%u > %u)\n",
+                      name.length(), MAX_FAN_NAME_LEN);
+        return -1;
+    }
     if (max_speed < 1 || max_speed > 6) {
         Serial.printf("[config] addFan: invalid max_speed %d\n", max_speed);
         return -1;
@@ -194,6 +199,11 @@ bool updateFan(int id, const String* name, const int* max_speed, const bool* lig
     if (name) {
         if (name->isEmpty()) {
             Serial.println("[config] updateFan: name cannot be empty");
+            return false;
+        }
+        if (name->length() > MAX_FAN_NAME_LEN) {
+            Serial.printf("[config] updateFan: name too long (%u > %u)\n",
+                          name->length(), MAX_FAN_NAME_LEN);
             return false;
         }
         fan->name = *name;

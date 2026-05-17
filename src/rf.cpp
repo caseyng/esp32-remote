@@ -61,9 +61,9 @@ bool rfLearn(const String& fanId, const String& command,
     // Clear any previously captured signal
     g_rc.resetAvailable();
 
-    const unsigned long deadline = millis() + static_cast<unsigned long>(timeoutMs);
+    const unsigned long start = millis();
 
-    while (millis() < deadline) {
+    while ((millis() - start) < static_cast<unsigned long>(timeoutMs)) {
         if (g_rc.available()) {
             *outValue    = static_cast<uint32_t>(g_rc.getReceivedValue());
             *outPulse    = static_cast<uint16_t>(g_rc.getReceivedDelay());
