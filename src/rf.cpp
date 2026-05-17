@@ -18,7 +18,7 @@ void rfInit() {
     // Set sensible defaults for the transmitter; these are overridden per-send
     g_rc.setProtocol(1);
     g_rc.setPulseLength(350);
-    g_rc.setRepeatTransmit(5);  // send each code 5 times for reliability
+    g_rc.setRepeatTransmit(3);  // send each code 3 times for reliability
 
     // Receiver: enable on RX pin with interrupt
     // RCSwitch uses attachInterrupt internally; the pin must support interrupts.

@@ -254,7 +254,12 @@ bool setFanCode(int id, const String& command, uint32_t value,
         return false;
     }
 
-    fan->codes[command] = RFCode{value, pulse, protocol, bits};
+    RFCode code;
+    code.value = value;
+    code.pulse = pulse;
+    code.protocol = protocol;
+    code.bits = bits;
+    fan->codes[command] = code;
     Serial.printf("[config] Set code for fan id=%d command='%s' value=%lu\n",
                   id, command.c_str(), (unsigned long)value);
     return true;
@@ -262,4 +267,13 @@ bool setFanCode(int id, const String& command, uint32_t value,
 
 const std::vector<FanConfig>& getAllFans() {
     return g_fans;
+}
+
+bool clearFanCode(int id, const String& command) {
+    if (!isValidCommand(command)) return false;
+    FanConfig* fan = getFanById(id);
+    if (!fan) return false;
+    fan->codes.erase(command);
+    Serial.printf("[config] Cleared code for fan id=%d command='%s'\n", id, command.c_str());
+    return configSave();
 }

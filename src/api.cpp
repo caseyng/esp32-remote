@@ -4,18 +4,43 @@
  * All endpoints return JSON.  Error responses always include an "error" field.
  * Endpoints that mutate state immediately persist via configSave().
  *
- * Endpoint summary:
- *   GET  /fans
- *   POST /fans/add
- *   POST /fans/{id}/update
- *   DEL  /fans/{id}
- *   POST /fans/{id}/learn/{command}   → 202; learn runs in background task
- *   GET  /fans/{id}/learn/status      → poll for learn result
- *   POST /fans/{id}/off
- *   POST /fans/{id}/speed/{level}
- *   POST /fans/{id}/light/on
- *   POST /fans/{id}/light/off
- *   GET  /status
+ * Endpoint summary (grouped by function):
+ *
+ * Fan management:
+ *   GET    /fans                        list all fans and learned codes
+ *   POST   /fans/add                    add a fan  {"name","max_speed","lights","reverse"}
+ *   POST   /fans/{id}/update            update fan {"name","max_speed","lights","reverse"}
+ *   DELETE /fans/{id}                   delete a fan
+ *
+ * Learning (mirrors control paths):
+ *   POST   /fans/{id}/learn/off         learn the off code
+ *   POST   /fans/{id}/learn/speed/{n}   learn speed n (1-6)
+ *   POST   /fans/{id}/learn/light/on    learn light on code
+ *   POST   /fans/{id}/learn/light/off   learn light off code
+ *   POST   /fans/{id}/learn/reverse/on  learn reverse on code
+ *   POST   /fans/{id}/learn/reverse/off learn reverse off code
+ *   GET    /fans/{id}/learn/status      poll learn result (RUNNING/DONE_OK/DONE_TIMEOUT)
+ *
+ * Unlearning:
+ *   POST   /fans/{id}/unlearn/off
+ *   POST   /fans/{id}/unlearn/speed/{n}
+ *   POST   /fans/{id}/unlearn/light/on
+ *   POST   /fans/{id}/unlearn/light/off
+ *   POST   /fans/{id}/unlearn/reverse/on
+ *   POST   /fans/{id}/unlearn/reverse/off
+ *
+ * Control:
+ *   POST   /fans/{id}/off
+ *   POST   /fans/{id}/speed/{n}
+ *   POST   /fans/{id}/light/on
+ *   POST   /fans/{id}/light/off
+ *   POST   /fans/{id}/reverse/on
+ *   POST   /fans/{id}/reverse/off
+ *
+ * System:
+ *   GET    /help                        show all endpoints with examples
+ *   GET    /status                      uptime, heap, wifi, filesystem stats
+ *   POST   /factory-reset               wipe LittleFS and restart
  */
 
 #include "api.h"
@@ -170,13 +195,22 @@ static const char* validateCommandForFan(const FanConfig* fan, const String& com
 // Build the "codes_learned" object for a fan
 // ---------------------------------------------------------------------------
 
-static void appendCodesLearned(JsonObject& fanObj, const FanConfig& fan) {
+static void appendCodesLearned(JsonObject& fanObj, const FanConfig& fan, bool verbose) {
     JsonObject cl = fanObj["codes_learned"].to<JsonObject>();
     for (int i = 0; ALL_COMMANDS[i] != nullptr; ++i) {
         const String cmd = ALL_COMMANDS[i];
         auto it = fan.codes.find(cmd);
         bool learned = (it != fan.codes.end() && it->second.value != 0);
-        cl[cmd] = learned;
+        if (verbose && learned) {
+            JsonObject codeObj = cl[cmd].to<JsonObject>();
+            codeObj["learned"]  = true;
+            codeObj["value"]    = it->second.value;
+            codeObj["pulse"]    = it->second.pulse;
+            codeObj["protocol"] = it->second.protocol;
+            codeObj["bits"]     = it->second.bits;
+        } else {
+            cl[cmd] = learned;
+        }
     }
 }
 
@@ -197,7 +231,8 @@ static void handleGetFans(AsyncWebServerRequest* req) {
         fanObj["max_speed"] = fan.max_speed;
         fanObj["lights"]    = fan.lights;
         fanObj["reverse"]   = fan.reverse;
-        appendCodesLearned(fanObj, fan);
+        bool verbose = req->hasParam("verbose");
+        appendCodesLearned(fanObj, fan, verbose);
     }
 
     sendJson(req, 200, doc);
@@ -368,7 +403,27 @@ static void handleDeleteFan(AsyncWebServerRequest* req, int fanId) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /fans/{id}/learn/{command}
+// Path-to-command conversion
+// Converts URL path segments to internal command strings.
+// e.g. "speed/3" → "speed_3", "light/on" → "light_on", "off" → "off"
+// Returns empty string if the path is not a valid command.
+// ---------------------------------------------------------------------------
+
+static String pathToCommand(const String& path) {
+    if (path == "off")          return "off";
+    if (path == "light/on")     return "light_on";
+    if (path == "light/off")    return "light_off";
+    if (path == "reverse/on")   return "reverse_on";
+    if (path == "reverse/off")  return "reverse_off";
+    if (path.startsWith("speed/")) {
+        String level = path.substring(6);
+        if (level.length() > 0) return "speed_" + level;
+    }
+    return "";
+}
+
+// ---------------------------------------------------------------------------
+// POST /fans/{id}/learn/...
 // ---------------------------------------------------------------------------
 
 static void handleLearn(AsyncWebServerRequest* req, int fanId, const String& command) {
@@ -610,14 +665,12 @@ void apiInit() {
     );
 
     // -----------------------------------------------------------------------
-    // Dynamic routes via URL regex-style matching with path params.
-    // ESPAsyncWebServer supports {variable} placeholders in paths.
+    // Dynamic routes using ASYNCWEBSERVER_REGEX regex patterns.
+    // pathArg(0) = first capture group, pathArg(1) = second, etc.
     // -----------------------------------------------------------------------
 
-    // POST /fans/{id}/update
-    // parseFanId is validated in onRequest (fires once) and stored in
-    // _tempObject so onBody never sends a duplicate error on chunked bodies.
-    g_server.on("/fans/{id}/update", HTTP_POST,
+    // POST /fans/<id>/update
+    g_server.on("^\\/fans\\/([0-9]+)\\/update$", HTTP_POST,
         [](AsyncWebServerRequest* req) {
             int fanId = parseFanId(req, req->pathArg(0));
             if (fanId < 0) {
@@ -638,75 +691,145 @@ void apiInit() {
         }
     );
 
-    // DELETE /fans/{id}
-    g_server.on("/fans/{id}", HTTP_DELETE, [](AsyncWebServerRequest* req) {
+    // DELETE /fans/<id>
+    g_server.on("^\\/fans\\/([0-9]+)$", HTTP_DELETE, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleDeleteFan(req, fanId);
     });
 
-    // POST /fans/{id}/learn/{command}
-    g_server.on("/fans/{id}/learn/{command}", HTTP_POST,
-        [](AsyncWebServerRequest* req) {
-            int fanId = parseFanId(req, req->pathArg(0));
-            if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
-            String command = req->pathArg(1);
-            handleLearn(req, fanId, command);
-        }
-    );
+    // -----------------------------------------------------------------------
+    // Learning — GET status first so it doesn't match the generic learn route
+    // -----------------------------------------------------------------------
 
-    // GET /fans/{id}/learn/status
-    g_server.on("/fans/{id}/learn/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+    // GET /fans/<id>/learn/status
+    g_server.on("^\\/fans\\/([0-9]+)\\/learn\\/status$", HTTP_GET, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleLearnStatus(req, fanId);
     });
 
-    // POST /fans/{id}/off
-    g_server.on("/fans/{id}/off", HTTP_POST, [](AsyncWebServerRequest* req) {
+    // POST /fans/<id>/learn/off|speed/<n>|light/on|light/off|reverse/on|reverse/off
+    g_server.on("^\\/fans\\/([0-9]+)\\/learn\\/(.+)$", HTTP_POST,
+        [](AsyncWebServerRequest* req) {
+            int fanId = parseFanId(req, req->pathArg(0));
+            if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
+            String command = pathToCommand(req->pathArg(1));
+            if (command.isEmpty()) { sendError(req, 400, "invalid command path"); return; }
+            handleLearn(req, fanId, command);
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // Unlearning
+    // -----------------------------------------------------------------------
+
+    // POST /fans/<id>/unlearn/off|speed/<n>|light/on|light/off|reverse/on|reverse/off
+    g_server.on("^\\/fans\\/([0-9]+)\\/unlearn\\/(.+)$", HTTP_POST,
+        [](AsyncWebServerRequest* req) {
+            int fanId = parseFanId(req, req->pathArg(0));
+            if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
+            String command = pathToCommand(req->pathArg(1));
+            if (command.isEmpty()) { sendError(req, 400, "invalid command path"); return; }
+            if (!clearFanCode(fanId, command)) { sendError(req, 404, "fan not found or command unknown"); return; }
+            sendOk(req);
+        }
+    );
+
+    // -----------------------------------------------------------------------
+    // Control
+    // -----------------------------------------------------------------------
+
+    // POST /fans/<id>/off
+    g_server.on("^\\/fans\\/([0-9]+)\\/off$", HTTP_POST, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanOff(req, fanId);
     });
 
-    // POST /fans/{id}/speed/{level}
-    g_server.on("/fans/{id}/speed/{level}", HTTP_POST, [](AsyncWebServerRequest* req) {
+    // POST /fans/<id>/speed/<level>
+    g_server.on("^\\/fans\\/([0-9]+)\\/speed\\/([0-9]+)$", HTTP_POST, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
-        String levelStr = req->pathArg(1);
-        for (char c : levelStr) {
-            if (!isdigit(c)) { sendError(req, 400, "invalid speed level"); return; }
-        }
-        int level = levelStr.toInt();
+        int level = req->pathArg(1).toInt();
         handleFanSpeed(req, fanId, level);
     });
 
-    // POST /fans/{id}/light/on
-    g_server.on("/fans/{id}/light/on", HTTP_POST, [](AsyncWebServerRequest* req) {
+    // POST /fans/<id>/light/on
+    g_server.on("^\\/fans\\/([0-9]+)\\/light\\/on$", HTTP_POST, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanLight(req, fanId, true);
     });
 
-    // POST /fans/{id}/light/off
-    g_server.on("/fans/{id}/light/off", HTTP_POST, [](AsyncWebServerRequest* req) {
+    // POST /fans/<id>/light/off
+    g_server.on("^\\/fans\\/([0-9]+)\\/light\\/off$", HTTP_POST, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanLight(req, fanId, false);
     });
 
-    // POST /fans/{id}/reverse/on
-    g_server.on("/fans/{id}/reverse/on", HTTP_POST, [](AsyncWebServerRequest* req) {
+    // POST /fans/<id>/reverse/on
+    g_server.on("^\\/fans\\/([0-9]+)\\/reverse\\/on$", HTTP_POST, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanReverse(req, fanId, true);
     });
 
-    // POST /fans/{id}/reverse/off
-    g_server.on("/fans/{id}/reverse/off", HTTP_POST, [](AsyncWebServerRequest* req) {
+    // POST /fans/<id>/reverse/off
+    g_server.on("^\\/fans\\/([0-9]+)\\/reverse\\/off$", HTTP_POST, [](AsyncWebServerRequest* req) {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanReverse(req, fanId, false);
+    });
+
+    // -----------------------------------------------------------------------
+    // System
+    // -----------------------------------------------------------------------
+
+    // GET /help
+    g_server.on("/help", HTTP_GET, [](AsyncWebServerRequest* req) {
+        String ip = WiFi.localIP().toString();
+        String base = "http://" + ip;
+        JsonDocument doc;
+
+        JsonObject fans = doc["fan_management"].to<JsonObject>();
+        fans["list_fans"]   = "GET "    + base + "/fans";
+        fans["add_fan"]     = "POST "   + base + "/fans/add  {\"name\":\"Living Room\",\"max_speed\":6,\"lights\":true,\"reverse\":true}";
+        fans["update_fan"]  = "POST "   + base + "/fans/{id}/update  {\"name\":\"New Name\"}";
+        fans["delete_fan"]  = "DELETE " + base + "/fans/{id}";
+
+        JsonObject learn = doc["learning"].to<JsonObject>();
+        learn["learn_off"]        = "POST " + base + "/fans/{id}/learn/off";
+        learn["learn_speed"]      = "POST " + base + "/fans/{id}/learn/speed/{1-6}";
+        learn["learn_light_on"]   = "POST " + base + "/fans/{id}/learn/light/on";
+        learn["learn_light_off"]  = "POST " + base + "/fans/{id}/learn/light/off";
+        learn["learn_reverse_on"] = "POST " + base + "/fans/{id}/learn/reverse/on";
+        learn["learn_reverse_off"]= "POST " + base + "/fans/{id}/learn/reverse/off";
+        learn["learn_status"]     = "GET "  + base + "/fans/{id}/learn/status";
+
+        JsonObject unlearn = doc["unlearning"].to<JsonObject>();
+        unlearn["unlearn_off"]        = "POST " + base + "/fans/{id}/unlearn/off";
+        unlearn["unlearn_speed"]      = "POST " + base + "/fans/{id}/unlearn/speed/{1-6}";
+        unlearn["unlearn_light_on"]   = "POST " + base + "/fans/{id}/unlearn/light/on";
+        unlearn["unlearn_light_off"]  = "POST " + base + "/fans/{id}/unlearn/light/off";
+        unlearn["unlearn_reverse_on"] = "POST " + base + "/fans/{id}/unlearn/reverse/on";
+        unlearn["unlearn_reverse_off"]= "POST " + base + "/fans/{id}/unlearn/reverse/off";
+
+        JsonObject control = doc["control"].to<JsonObject>();
+        control["off"]        = "POST " + base + "/fans/{id}/off";
+        control["speed"]      = "POST " + base + "/fans/{id}/speed/{1-6}";
+        control["light_on"]   = "POST " + base + "/fans/{id}/light/on";
+        control["light_off"]  = "POST " + base + "/fans/{id}/light/off";
+        control["reverse_on"] = "POST " + base + "/fans/{id}/reverse/on";
+        control["reverse_off"]= "POST " + base + "/fans/{id}/reverse/off";
+
+        JsonObject system = doc["system"].to<JsonObject>();
+        system["help"]          = "GET "  + base + "/help";
+        system["status"]        = "GET "  + base + "/status";
+        system["factory_reset"] = "POST " + base + "/factory-reset";
+
+        sendJson(req, 200, doc);
     });
 
     // GET /status

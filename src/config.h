@@ -117,3 +117,9 @@ const std::vector<FanConfig>& getAllFans();
  * Return true if the given command string is one of ALL_COMMANDS.
  */
 bool isValidCommand(const String& command);
+
+/**
+ * Clear (unlearn) the RF code for a particular command on a particular fan.
+ * Returns false if the fan is not found or the command name is unknown.
+ */
+bool clearFanCode(int id, const String& command);
