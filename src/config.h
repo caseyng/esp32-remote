@@ -29,7 +29,8 @@ struct FanConfig {
     String                     name;
     int                        max_speed = 3;
     bool                       lights    = false;
-    std::map<String, RFCode>   codes;     // command → RFCode
+    bool                       reverse   = false;
+    std::map<String, RFCode>   codes;
 };
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ static const char* const ALL_COMMANDS[] = {
     "speed_1", "speed_2", "speed_3",
     "speed_4", "speed_5", "speed_6",
     "light_on", "light_off",
+    "reverse_on", "reverse_off",
     nullptr
 };
 
@@ -84,13 +86,13 @@ FanConfig* getFanById(int id);
  * Initialises all command codes to the "not learned" state (value=0).
  * Returns the new fan's id, or -1 on error (e.g. name is empty).
  */
-int addFan(const String& name, int max_speed, bool lights);
+int addFan(const String& name, int max_speed, bool lights, bool reverse);
 
 /**
  * Update mutable fan fields.  Pass nullptr to leave a field unchanged.
  * Returns false if the fan is not found or if the new values are invalid.
  */
-bool updateFan(int id, const String* name, const int* max_speed, const bool* lights);
+bool updateFan(int id, const String* name, const int* max_speed, const bool* lights, const bool* reverse);
 
 /**
  * Delete a fan by id.

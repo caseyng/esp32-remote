@@ -87,6 +87,7 @@ bool configLoad() {
         fan.name      = fanObj["name"]      | String("");
         fan.max_speed = fanObj["max_speed"] | 3;
         fan.lights    = fanObj["lights"]    | false;
+        fan.reverse   = fanObj["reverse"]   | false;
 
         // Load codes
         JsonObject codesObj = fanObj["codes"].as<JsonObject>();
@@ -138,6 +139,7 @@ JsonDocument configToJson() {
         fanObj["name"]      = fan.name;
         fanObj["max_speed"] = fan.max_speed;
         fanObj["lights"]    = fan.lights;
+        fanObj["reverse"]   = fan.reverse;
 
         JsonObject codesObj = fanObj["codes"].to<JsonObject>();
         for (const auto& [cmd, code] : fan.codes) {
@@ -156,7 +158,7 @@ FanConfig* getFanById(int id) {
     return nullptr;
 }
 
-int addFan(const String& name, int max_speed, bool lights) {
+int addFan(const String& name, int max_speed, bool lights, bool reverse) {
     if (name.isEmpty()) {
         Serial.println("[config] addFan: name is empty");
         return -1;
@@ -182,6 +184,7 @@ int addFan(const String& name, int max_speed, bool lights) {
     fan.name      = name;
     fan.max_speed = max_speed;
     fan.lights    = lights;
+    fan.reverse   = reverse;
     initFanCodes(fan);
 
     g_fans.push_back(std::move(fan));
@@ -189,7 +192,7 @@ int addFan(const String& name, int max_speed, bool lights) {
     return newId;
 }
 
-bool updateFan(int id, const String* name, const int* max_speed, const bool* lights) {
+bool updateFan(int id, const String* name, const int* max_speed, const bool* lights, const bool* reverse) {
     FanConfig* fan = getFanById(id);
     if (!fan) {
         Serial.printf("[config] updateFan: fan id=%d not found\n", id);
@@ -217,6 +220,9 @@ bool updateFan(int id, const String* name, const int* max_speed, const bool* lig
     }
     if (lights) {
         fan->lights = *lights;
+    }
+    if (reverse) {
+        fan->reverse = *reverse;
     }
 
     Serial.printf("[config] Updated fan id=%d\n", id);

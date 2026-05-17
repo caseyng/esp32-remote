@@ -153,6 +153,9 @@ static const char* validateCommandForFan(const FanConfig* fan, const String& com
     if ((command == "light_on" || command == "light_off") && !fan->lights) {
         return "fan does not have lights";
     }
+    if ((command == "reverse_on" || command == "reverse_off") && !fan->reverse) {
+        return "fan does not have reverse mode";
+    }
     // speed_4..speed_6 — check against max_speed
     if (command.startsWith("speed_")) {
         int level = command.substring(6).toInt();
@@ -193,6 +196,7 @@ static void handleGetFans(AsyncWebServerRequest* req) {
         fanObj["name"]      = fan.name;
         fanObj["max_speed"] = fan.max_speed;
         fanObj["lights"]    = fan.lights;
+        fanObj["reverse"]   = fan.reverse;
         appendCodesLearned(fanObj, fan);
     }
 
@@ -245,7 +249,13 @@ static void handleAddFan(AsyncWebServerRequest* req, uint8_t* data, size_t len,
     }
     bool lights = body["lights"].as<bool>();
 
-    int newId = addFan(name, max_speed, lights);
+    if (!body["reverse"].is<bool>()) {
+        sendError(req, 400, "reverse is required and must be a boolean");
+        return;
+    }
+    bool reverse = body["reverse"].as<bool>();
+
+    int newId = addFan(name, max_speed, lights, reverse);
     if (newId < 0) {
         sendError(req, 400, "failed to add fan");
         return;
@@ -295,6 +305,8 @@ static void handleUpdateFan(AsyncWebServerRequest* req, uint8_t* data, size_t le
     const int* msPtr = nullptr;
     bool lightsVal = false;
     const bool* lightsPtr = nullptr;
+    bool reverseVal = false;
+    const bool* reversePtr = nullptr;
 
     if (body["name"].is<const char*>()) {
         nameVal = body["name"].as<String>();
@@ -319,7 +331,12 @@ static void handleUpdateFan(AsyncWebServerRequest* req, uint8_t* data, size_t le
         lightsPtr = &lightsVal;
     }
 
-    if (!updateFan(fanId, namePtr, msPtr, lightsPtr)) {
+    if (body["reverse"].is<bool>()) {
+        reverseVal = body["reverse"].as<bool>();
+        reversePtr = &reverseVal;
+    }
+
+    if (!updateFan(fanId, namePtr, msPtr, lightsPtr, reversePtr)) {
         sendError(req, 400, "update failed");
         return;
     }
@@ -532,6 +549,40 @@ static void handleFanLight(AsyncWebServerRequest* req, int fanId, bool turnOn) {
 }
 
 // ---------------------------------------------------------------------------
+// POST /fans/{id}/reverse/on
+// POST /fans/{id}/reverse/off
+// ---------------------------------------------------------------------------
+
+static void handleFanReverse(AsyncWebServerRequest* req, int fanId, bool turnOn) {
+    Serial.printf("[api] POST /fans/%d/reverse/%s\n", fanId, turnOn ? "on" : "off");
+
+    FanConfig* fan = getFanById(fanId);
+    if (!fan) {
+        sendError(req, 404, "fan not found");
+        return;
+    }
+
+    if (!fan->reverse) {
+        sendError(req, 400, "fan does not have reverse mode");
+        return;
+    }
+
+    String cmd = turnOn ? "reverse_on" : "reverse_off";
+    auto it = fan->codes.find(cmd);
+    if (it == fan->codes.end() || it->second.value == 0) {
+        sendError(req, 409, "reverse code not yet learned");
+        return;
+    }
+
+    const RFCode& code = it->second;
+    if (!rfSend(code.value, code.pulse, code.protocol, code.bits)) {
+        sendError(req, 500, "RF transmit failed");
+        return;
+    }
+    sendOk(req);
+}
+
+// ---------------------------------------------------------------------------
 // apiInit — register all routes and start the server
 // ---------------------------------------------------------------------------
 
@@ -642,6 +693,20 @@ void apiInit() {
         int fanId = parseFanId(req, req->pathArg(0));
         if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
         handleFanLight(req, fanId, false);
+    });
+
+    // POST /fans/{id}/reverse/on
+    g_server.on("/fans/{id}/reverse/on", HTTP_POST, [](AsyncWebServerRequest* req) {
+        int fanId = parseFanId(req, req->pathArg(0));
+        if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
+        handleFanReverse(req, fanId, true);
+    });
+
+    // POST /fans/{id}/reverse/off
+    g_server.on("/fans/{id}/reverse/off", HTTP_POST, [](AsyncWebServerRequest* req) {
+        int fanId = parseFanId(req, req->pathArg(0));
+        if (fanId < 0) { sendError(req, 400, "invalid fan id"); return; }
+        handleFanReverse(req, fanId, false);
     });
 
     // GET /status
